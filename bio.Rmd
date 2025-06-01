@@ -1,0 +1,732 @@
+---
+title: "biology"
+author: "Yi Chou"
+date: "2025-05-18"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(SeuratData)
+```
+```{r}
+# 加载必要的库
+library(Seurat)
+library(SeuratData)
+
+# 加载数据集
+data("pbmc3k")
+
+# 更新 Seurat 对象以兼容当前版本
+pbmc3k <- UpdateSeuratObject(pbmc3k)
+
+# 查看数据对象
+pbmc3k
+
+```
+
+```{r}
+# 提取表达矩阵（稀疏矩阵）
+expr_mat <- GetAssayData(pbmc3k, slot = "counts")
+
+# 获取基因和细胞名称
+gene_names <- rownames(expr_mat)
+cell_names <- colnames(expr_mat)
+
+# 将稀疏矩阵转换为数据框（仅包含非零值）
+expr_df <- as.data.frame(summary(expr_mat))
+colnames(expr_df) <- c("gene_index", "cell_index", "expression")
+expr_df$gene_id <- gene_names[expr_df$gene_index]
+expr_df$cell_id <- cell_names[expr_df$cell_index]
+expr_df <- expr_df[, c("cell_id", "gene_id", "expression")]
+
+# 提取元信息
+meta_df <- pbmc3k@meta.data
+meta_df$cell_id <- rownames(meta_df)
+```
+```{r}
+# 加载必要的库
+library(DBI)
+library(RSQLite)
+
+# 建立数据库连接
+conn <- dbConnect(SQLite(), "pbmc3k.sqlite")
+
+# 写入元信息表
+dbWriteTable(conn, "metadata", meta_df, overwrite = TRUE)
+
+# 写入表达矩阵表
+dbWriteTable(conn, "expression", expr_df, overwrite = TRUE)
+
+# 查看数据库中的表格
+dbListFields(conn, "metadata")
+```
+```{r}
+#确认数据库中有哪些seurat_annotations
+query <- "
+  SELECT DISTINCT seurat_annotations 
+  FROM metadata
+"
+unique_annots <- dbGetQuery(conn, query)
+print(unique_annots)
+```
+
+```{r}
+#查询所有 CD14+ 单核细胞的元信息
+query <- "
+  SELECT * FROM metadata 
+  WHERE seurat_annotations = 'CD14+ Mono'
+"
+mono_meta <- dbGetQuery(conn, query)
+mono_meta
+```
+
+```{r}
+#查询各类细胞的数量（分组统计）
+query <- "
+  SELECT seurat_annotations, COUNT(*) as num_cells
+  FROM metadata
+  GROUP BY seurat_annotations
+  ORDER BY num_cells DESC
+"
+cell_type_count <- dbGetQuery(conn, query)
+print(cell_type_count)
+```
+```{r}
+#查询某细胞类型表达量最高的基因
+query <- "
+  SELECT gene_id, AVG(expression) as avg_expr
+  FROM expression
+  JOIN metadata USING(cell_id)
+  WHERE seurat_annotations = 'CD14+ Mono'
+  GROUP BY gene_id
+  ORDER BY avg_expr DESC
+  LIMIT 10
+"
+top_genes <- dbGetQuery(conn, query)
+print(top_genes)
+```
+```{r}
+library(Seurat)
+library(ggplot2)
+
+pbmc3k <- NormalizeData(pbmc3k)
+pbmc3k <- FindVariableFeatures(pbmc3k)
+pbmc3k <- ScaleData(pbmc3k)
+pbmc3k <- RunPCA(pbmc3k)
+pbmc3k <- FindNeighbors(pbmc3k, dims = 1:10)
+pbmc3k <- RunUMAP(pbmc3k, dims = 1:10)
+```
+```{r}
+DimPlot(pbmc3k, reduction = "umap", group.by = "seurat_annotations", label = TRUE) +
+  ggtitle("UMAP Plot - Cell Type Annotation")
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 统计不同细胞类型的数量
+cell_type_counts <- pbmc3k@meta.data %>%
+  filter(!is.na(seurat_annotations)) %>%
+  count(seurat_annotations)
+
+# 绘图
+ggplot(cell_type_counts, aes(x = reorder(seurat_annotations, -n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Cell Type", y = "Cell Count", title = "Number of Cells per Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+# 在不同细胞中绘制 CD14 基因表达
+FeaturePlot(pbmc3k, features = "CD14") +
+  ggtitle("Expression of CD14 across cells")
+```
+
+```{r}
+#对比多种基因在不同细胞中的表达
+VlnPlot(pbmc3k, features = "CD14", group.by = "seurat_annotations") +
+  ggtitle("CD14 Expression by Cell Type")
+
+VlnPlot(pbmc3k, features = "MS4A1", group.by = "seurat_annotations") +
+  ggtitle("MS4A1 Expression by Cell Type")
+
+VlnPlot(pbmc3k, features = "GNLY", group.by = "seurat_annotations") +
+  ggtitle("GNLY Expression by Cell Type")
+```
+```{r}
+#查出 Naive CD4 T 中表达最强的基因，可视化该基因的空间分布
+query <- "
+  SELECT gene_id, AVG(expression) as avg_expr
+  FROM expression
+  JOIN metadata USING(cell_id)
+  WHERE seurat_annotations = 'Naive CD4 T'
+  GROUP BY gene_id
+  ORDER BY avg_expr DESC
+  LIMIT 1
+"
+top_gene <- dbGetQuery(conn, query)
+print(top_gene)
+FeaturePlot(pbmc3k, features = top_gene$gene_id) +
+  ggtitle(paste("Top gene in Naive CD4 T cells:", top_gene$gene_id))
+```
+```{r}
+query <- "
+  SELECT gene_id, AVG(expression) AS avg_expr
+  FROM expression
+  JOIN metadata USING(cell_id)
+  WHERE seurat_annotations = 'CD14+ Mono'
+  GROUP BY gene_id
+  ORDER BY avg_expr DESC
+  LIMIT 10
+"
+top_genes <- dbGetQuery(conn, query)
+print(top_genes)
+```
+
+
+```{r}
+# 提取细胞 ID
+mono_cells <- pbmc3k@meta.data %>%
+  filter(seurat_annotations == "CD14+ Mono") %>%
+  rownames()
+
+# 提取表达数据（RNA counts）并转为矩阵
+expr_matrix <- GetAssayData(pbmc3k, slot = "data")  # log-normalized
+top_gene_ids <- top_genes$gene_id
+heatmap_mat <- as.matrix(expr_matrix[top_gene_ids, mono_cells])
+
+```
+
+```{r}
+library(heatmaply)
+
+heatmaply(heatmap_mat,
+          Rowv = TRUE, Colv = TRUE,
+          colors = viridis::viridis,
+          k_col = 3,
+          main = "Interactive Heatmap: CD14+ Mono")
+```
+```{r}
+# 设置细胞身份为注释标签
+Idents(pbmc3k) <- "seurat_annotations"
+
+# 查看所有可选的细胞类型（你已经有了）
+levels(pbmc3k)
+
+```
+```{r}
+# 差异表达分析：CD14+ Mono vs Naive CD4 T
+markers_mono_vs_naive <- FindMarkers(pbmc3k,
+                                      ident.1 = "CD14+ Mono",
+                                      ident.2 = "Naive CD4 T",
+                                      min.pct = 0.25,
+                                      logfc.threshold = 0.25)
+
+# 查看前几行
+head(markers_mono_vs_naive)
+```
+```{r}
+# 添加 gene_id 列
+markers_mono_vs_naive$gene_id <- rownames(markers_mono_vs_naive)
+
+# 存入 SQLite
+dbWriteTable(conn, "DEG_mono_vs_naive", markers_mono_vs_naive, overwrite = TRUE)
+
+# 查询一下看看
+dbGetQuery(conn, "SELECT * FROM DEG_mono_vs_naive LIMIT 5")
+```
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# 提取显著差异的上调基因（adj.p.val < 0.05 且 logFC > 0.5）
+up_genes <- markers_mono_vs_naive %>%
+  filter(p_val_adj < 0.05, avg_log2FC > 0.5) %>%
+  pull(gene_id)
+
+# 转换为 ENTREZID
+entrez_ids <- bitr(up_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# GO 富集分析
+go_enrich <- enrichGO(gene = entrez_ids$ENTREZID,
+                      OrgDb = org.Hs.eg.db,
+                      ont = "BP",  # Biological Process
+                      pAdjustMethod = "BH",
+                      qvalueCutoff = 0.05,
+                      readable = TRUE)
+
+# 展示结果
+head(go_enrich)
+
+library(stringr)
+
+go_enrich@result$Description <- str_wrap(go_enrich@result$Description, width = 40)
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+
+# 提取前 10 条 GO 结果并处理
+go_df <- go_enrich@result %>%
+  arrange(p.adjust) %>%
+  head(10) %>%
+  mutate(Description = str_wrap(Description, width = 50)) %>%
+  mutate(Description = factor(Description, levels = rev(Description)))  # 反转顺序用于水平条形图
+
+# 绘图
+ggplot(go_df, aes(x = Description, y = -log10(p.adjust))) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "GO Enrichment -log10(p.adjust)",
+       x = "GO Term",
+       y = "-log10(p.adjust)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.y = element_text(size = 10))
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 添加标记信息
+volcano_data <- markers_mono_vs_naive %>%
+  mutate(gene = rownames(.)) %>%
+  mutate(significance = case_when(
+    p_val_adj < 0.05 & avg_log2FC > 0.5 ~ "Upregulated",
+    p_val_adj < 0.05 & avg_log2FC < -0.5 ~ "Downregulated",
+    TRUE ~ "Not Significant"
+  ))
+```
+
+
+```{r}
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj), color = significance)) +
+  geom_point(alpha = 0.7, size = 1.5) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "gray")) +
+  labs(title = "Volcano Plot: CD14+ Mono vs Naive CD4 T",
+       x = "Log2 Fold Change",
+       y = "-Log10 Adjusted P-value") +
+  theme_minimal()
+```
+```{r}
+library(ggrepel)
+
+top_labels <- volcano_data %>%
+  filter(p_val_adj < 0.01 & abs(avg_log2FC) > 1) %>%
+  top_n(10, wt = -p_val_adj)
+
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj), color = significance)) +
+  geom_point(alpha = 0.6) +
+  geom_text_repel(data = top_labels, aes(label = gene), size = 3) +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Not Significant" = "gray")) +
+  labs(title = "Volcano Plot (Top 10 Genes Labeled)") +
+  theme_minimal()
+```
+```{r}
+library(pheatmap)
+
+# 提取数据并转换为 matrix
+expr_matrix <- as.matrix(GetAssayData(pbmc3k, slot = "data"))
+
+# 转换 top_genes 和 cells_use 为向量
+top_genes <- dbGetQuery(conn, "
+  SELECT gene_id
+  FROM DEG_mono_vs_naive
+  WHERE avg_log2FC > 0.5 AND p_val_adj < 0.05
+  ORDER BY avg_log2FC DESC
+  LIMIT 10
+")$gene_id
+
+top_genes <- as.character(top_genes)
+
+cells_use <- pbmc3k@meta.data %>%
+  filter(seurat_annotations %in% c("CD14+ Mono", "Naive CD4 T")) %>%
+  rownames() %>%
+  as.character()
+
+# 子集化表达矩阵
+mat <- expr_matrix[top_genes, cells_use]
+
+# 构造注释
+annotation_col <- data.frame(CellType = pbmc3k@meta.data[cells_use, "seurat_annotations"])
+rownames(annotation_col) <- cells_use
+```
+
+```{r}
+pheatmap(mat,
+         annotation_col = annotation_col,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         main = "Top DEGs Between CD14+ Mono and Naive CD4 T",
+         fontsize = 8)
+```
+
+
+```{r}
+library(Seurat)
+library(SeuratData)
+
+# 加载空间数据
+brain <- LoadData("stxBrain", type = "anterior1")
+brain <- UpdateSeuratObject(brain)
+brain <- SCTransform(brain, assay = "Spatial", verbose = FALSE)
+brain <- RunPCA(brain)
+brain <- FindNeighbors(brain, dims = 1:10)
+brain <- FindClusters(brain, resolution = 0.3)  # 这一行会生成 seurat_clusters
+brain <- RunUMAP(brain, dims = 1:10)
+brain
+```
+
+
+```{r}
+# ✅ 加载必要库
+library(Seurat)
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+# ✅ Step 1：获取空间坐标
+spatial_df <- GetTissueCoordinates(brain)  # imagecol = x, imagerow = y
+spatial_df$spot_id <- rownames(spatial_df)  # 添加唯一ID
+
+# ✅ Step 2：添加聚类信息（前提：你已运行 FindClusters）
+spatial_df$cluster <- brain@meta.data[spatial_df$spot_id, "seurat_clusters"]
+
+# ✅ Step 3：如果存在组织区域标记（tissue），也可添加（目前你没有可跳过）
+# spatial_df$tissue <- brain@images[[1]]@coordinates[spatial_df$spot_id, "tissue"]
+
+# ✅ Step 4：重排列顺序，统一结构
+# 重命名列名为标准格式
+spatial_df <- spatial_df %>%
+  dplyr::rename(
+    imagecol = x,
+    imagerow = y
+  )
+
+# 只保留我们需要的字段
+spatial_df <- spatial_df %>%
+  dplyr::select(spot_id, imagecol, imagerow, cluster)
+
+# ✅ Step 5：写入 SQLite 数据库
+conn <- dbConnect(SQLite(), "spatial_brain.sqlite")
+dbWriteTable(conn, "spatial_info", spatial_df, overwrite = TRUE)
+
+# ✅ 检查写入是否成功
+dbListTables(conn)
+dbGetQuery(conn, "SELECT * FROM spatial_info LIMIT 5")
+```
+
+
+```{r}
+SpatialFeaturePlot(brain, features = "Sox17") +
+  scale_fill_gradient(low = "lightgray", high = "firebrick") +
+  ggtitle("Sox17 Expression (Spatial)")
+```
+```{r}
+SpatialFeaturePlot(brain, features = c("Snap25", "Gad1", "Slc17a7"))
+```
+```{r}
+Idents(brain) <- "seurat_clusters"
+levels(brain)  # 查看所有 cluster 编号（如 "0", "1", "2"...）
+
+all_markers <- FindAllMarkers(brain,
+                               assay = "SCT",            # 你用了 SCTransform 处理
+                               only.pos = TRUE,          # 只找上调的 marker
+                               min.pct = 0.25,
+                               logfc.threshold = 0.25)
+
+# 查看前几行
+head(all_markers)
+```
+
+```{r}
+top_markers_by_cluster <- all_markers %>%
+  group_by(cluster) %>%
+  top_n(n = 3, wt = avg_log2FC)
+
+# 查看每个 cluster 的 top 3 gene
+top_markers_by_cluster
+```
+```{r}
+all_markers$gene_id <- all_markers$gene
+dbWriteTable(conn, "spatial_marker_genes", all_markers, overwrite = TRUE)
+
+# 查看入库结果
+dbGetQuery(conn, "SELECT * FROM spatial_marker_genes LIMIT 5")
+```
+```{r}
+# 取 cluster 3 的 top 1 marker
+all_markers$cluster <- as.character(all_markers$cluster)
+
+top_gene_c3 <- all_markers %>%
+  filter(cluster == 3) %>%
+  arrange(desc(avg_log2FC)) %>%
+  dplyr::slice(1) %>%
+  pull(gene)
+
+SpatialFeaturePlot(brain, features = top_gene_c3) +
+  ggtitle(paste("Top marker of Cluster 3:", top_gene_c3))
+```
+
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(dplyr)
+
+# 1️⃣ 准备一个空 list 用于保存每个 cluster 的富集结果
+go_results_list <- list()
+
+# 2️⃣ 获取所有 cluster
+all_clusters <- unique(all_markers$cluster)
+
+# 3️⃣ 对每个 cluster 执行富集分析
+for (clust in all_clusters) {
+  # 提取该 cluster 的 marker genes
+  markers <- all_markers %>%
+    filter(cluster == clust,
+           p_val_adj < 0.05,
+           avg_log2FC > 0.25)
+  
+  gene_symbols <- markers$gene
+  
+  # SYMBOL 转 ENTREZID
+  entrez <- tryCatch({
+    bitr(gene_symbols, fromType = "SYMBOL",
+         toType = "ENTREZID",
+         OrgDb = org.Mm.eg.db)
+  }, error = function(e) NULL)
+  
+  if (!is.null(entrez) && nrow(entrez) > 0) {
+    # 运行 enrichGO
+    ego <- enrichGO(gene = entrez$ENTREZID,
+                    OrgDb = org.Mm.eg.db,
+                    ont = "BP",
+                    pAdjustMethod = "BH",
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+    
+    # 保存结果
+    go_results_list[[as.character(clust)]] <- ego
+  } else {
+    message(paste("Cluster", clust, "没有有效的 ENTREZID，跳过"))
+  }
+}
+
+```
+
+```{r}
+go_results_list[["3"]] %>% head()
+```
+```{r}
+dotplot(go_results_list[["0"]], showCategory = 10) +
+  ggtitle("Cluster 0 - GO BP Enrichment")
+```
+```{r}
+# 示例：写入 SQLite 中的多个表
+for (clust in names(go_results_list)) {
+  go_df <- as.data.frame(go_results_list[[clust]])
+  table_name <- paste0("go_enrichment_cluster_", clust)
+  dbWriteTable(conn, table_name, go_df, overwrite = TRUE)
+}
+```
+
+```{r}
+data("bmcite")
+cite <- bmcite
+```
+
+```{r}
+cite
+Assays(cite)       # 查看模态类型
+colnames(cite@meta.data)  # 查看已有标签
+```
+```{r}
+library(Seurat)
+
+# 对 RNA assay 运行 SCTransform（更适合多模态整合）
+cite <- SCTransform(cite, assay = "RNA", verbose = FALSE)
+# 使用 CLR 方法进行蛋白数据归一化
+cite <- NormalizeData(cite, assay = "ADT", normalization.method = "CLR")
+cite <- ScaleData(cite, assay = "ADT")
+cite <- RunPCA(cite, assay = "ADT", reduction.name = "apca")
+Reductions(cite)
+```
+```{r}
+# 选择 RNA PCA 和 ADT PCA 做 WNN
+cite <- FindMultiModalNeighbors(
+  cite,
+  reduction.list = list("spca", "apca"),
+  dims.list = list(1:30, 1:18),
+  modality.weight.name = "RNA.weight"
+)
+cite <- FindClusters(cite, graph.name = "wsnn", resolution = 0.5)
+cite <- RunUMAP(cite, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+```
+
+```{r}
+DimPlot(cite, reduction = "wnn.umap", group.by = "seurat_clusters", label = TRUE) +
+  ggtitle("WNN Multi-modal UMAP")
+```
+
+```{r}
+DimPlot(cite, reduction = "wnn.umap", group.by = "donor") +
+  ggtitle("Distribution by Donor")
+```
+
+```{r}
+FeaturePlot(cite, features = c("CD3E"), reduction = "wnn.umap") +
+  ggtitle("RNA Expression of CD3E")
+FeaturePlot(cite, features = c("MS4A1"), reduction = "wnn.umap") +
+  ggtitle("RNA Expression of MS4A1")
+```
+
+
+```{r}
+DefaultAssay(cite) <- "ADT"
+
+FeaturePlot(cite, features = c("CD3"), reduction = "wnn.umap") +
+  ggtitle("Protein Expression (ADT):CD3")
+FeaturePlot(cite, features = c("CD4"), reduction = "wnn.umap") +
+  ggtitle("Protein Expression (ADT):CD4")
+FeaturePlot(cite, features = c("CD16"), reduction = "wnn.umap") +
+  ggtitle("Protein Expression (ADT):CD16")
+```
+
+```{r}
+DefaultAssay(cite) <- "RNA"  # 切换回 RNA 模态
+
+rna_markers <- FindAllMarkers(cite,
+                               assay = "RNA",
+                               only.pos = TRUE,
+                               min.pct = 0.25,
+                               logfc.threshold = 0.25)
+
+rna_markers$source <- "RNA"
+rna_markers$gene_id <- rna_markers$gene  # 便于数据库写入
+```
+
+```{r}
+DefaultAssay(cite) <- "ADT"
+
+adt_markers <- FindAllMarkers(cite,
+                               assay = "ADT",
+                               only.pos = TRUE,
+                               min.pct = 0.25,
+                               logfc.threshold = 0.25)
+
+adt_markers$source <- "ADT"
+adt_markers$gene_id <- adt_markers$gene
+```
+```{r}
+all_markers <- rbind(rna_markers, adt_markers)
+dbWriteTable(conn, "multimodal_markers", all_markers, overwrite = TRUE)
+
+# 快速查看
+dbGetQuery(conn, "SELECT * FROM multimodal_markers LIMIT 5")
+
+```
+```{r}
+# RNA marker 可视化
+DefaultAssay(cite) <- "RNA"
+FeaturePlot(cite, features = c("CD3E", "MS4A1"), reduction = "wnn.umap")
+
+# ADT marker 可视化
+DefaultAssay(cite) <- "ADT"
+FeaturePlot(cite, features = c("CD3", "CD14", "CD19"), reduction = "wnn.umap")
+
+```
+```{r}
+# 确保 RNA marker 是一部分
+rna_markers_only <- all_markers %>%
+  filter(source == "RNA", p_val_adj < 0.05, avg_log2FC > 0.25)
+```
+
+
+```{r}
+# 准备一个列表存放 GO 结果
+go_result_list <- list()
+
+all_clusters <- unique(rna_markers_only$cluster)
+
+for (clust in all_clusters) {
+  # 提取每个 cluster 的基因
+  genes <- rna_markers_only %>%
+    filter(cluster == clust) %>%
+    pull(gene)
+
+  # SYMBOL → ENTREZID 转换
+  entrez <- tryCatch({
+    bitr(genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+  }, error = function(e) NULL)
+
+  # 做富集分析
+  if (!is.null(entrez) && nrow(entrez) > 0) {
+    ego <- enrichGO(gene = entrez$ENTREZID,
+                    OrgDb = org.Hs.eg.db,
+                    ont = "BP",
+                    pAdjustMethod = "BH",
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+    go_result_list[[as.character(clust)]] <- ego
+  } else {
+    message(paste("Cluster", clust, "没有有效 ENTREZ ID"))
+  }
+}
+```
+
+```{r}
+dotplot(go_result_list[["0"]], showCategory = 10) +
+  ggtitle("Cluster 0 - GO BP Enrichment")
+```
+
+
+```{r}
+# 写入 SQLite
+for (clust in names(go_result_list)) {
+  go_df <- as.data.frame(go_result_list[[clust]])
+  table_name <- paste0("go_enrichment_cluster_", clust)
+  dbWriteTable(conn, table_name, go_df, overwrite = TRUE)
+}
+```
+
+
+```{r}
+# RNA 表达 vs 聚类编号
+DefaultAssay(cite) <- "RNA"
+
+VlnPlot(cite, features = "CD3E", group.by = "seurat_clusters") +
+  ggtitle("RNA - CD3E Expression by Cluster")
+
+# ADT 蛋白表达 vs 聚类编号
+DefaultAssay(cite) <- "ADT"
+
+VlnPlot(cite, features = "CD4", group.by = "seurat_clusters") +
+  ggtitle("ADT - CD4 Protein Expression by Cluster")
+```
+
+```{r}
+DimPlot(cite, reduction = "wnn.umap", group.by = "donor") +
+  ggtitle("UMAP by Donor")
+```
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
